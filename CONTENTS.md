@@ -62,6 +62,7 @@
 - [tempo](observability/tempo/)
 - [jaeger](observability/jaeger/)
 - [opentelemetry](observability/opentelemetry/)
+- [dash0](observability/dash0/)
 - [fluent-bit](observability/fluent-bit/)
 - [fluentd](observability/fluentd/)
 - [vector](observability/vector/)

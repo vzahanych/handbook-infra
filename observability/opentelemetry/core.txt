@@ -1,0 +1,613 @@
+OpenTelemetry — Core ideas
+==========================
+
+
+1. Fundamentals
+---------------
+
+OpenTelemetry, usually shortened to OTel, is a vendor-neutral standard and toolkit for producing and shipping telemetry. 
+The promise is simple: you instrument your code once, and you can send the resulting data to any observability backend you like. 
+It has become the default way to instrument modern systems 
+because it separates the act of producing telemetry from the choice of where that telemetry is stored.
+
+The problem it solves is fragmentation. Before OTel, each monitoring vendor shipped its own agent, 
+its own libraries, and its own data format, so switching backends meant re-instrumenting every service. 
+OpenTelemetry replaces that with one set of language libraries, one wire protocol, and one collector, 
+so the backend becomes a configuration choice rather than a rewrite.
+
+The data itself comes in categories called signals. The four supported today are traces, 
+which follow a request as it moves through your system; metrics, which are numeric measurements taken over time; 
+logs, which are timestamped records of events; and baggage, which carries small pieces of contextual data alongside a request. 
+Two more signals, events and profiles, are still being developed.
+
+The moving parts fit together as a pipeline. Libraries inside your application generate the signals and pass context from one service to the next. 
+An optional collector then receives that data, processes it, and forwards it on. 
+Finally, exporters speaking the OpenTelemetry Protocol, known as OTLP, 
+deliver it to backends such as Prometheus, Tempo, Jaeger, or Loki.
+
+Around that pipeline sit the conventions that keep the data trustworthy. 
+Semantic conventions agree on attribute names so telemetry means the same thing in every language and tool, 
+while resources, instrumentation scope, and sampling describe where the data came from and how much of it you choose to keep. 
+Taken together, OpenTelemetry is the producer side of observability, and the storage and visualization backends are the consumers.
+
+
+2. The specification
+--------------------
+
+The specification is the written contract that defines what every OpenTelemetry implementation must do. 
+It is the reason a trace produced by the Go library means the same thing as one produced by the Python library: 
+both are built to satisfy the same document. Rather than something you install, 
+it is the single source of truth that all the language implementations are measured against.
+
+Its first concern is the application programming interface, 
+the surface that your code and the instrumentation libraries call to create telemetry. 
+The specification fixes how that interface behaves, 
+so that the act of starting a span or recording a measurement is identical in spirit across every language, 
+even though the syntax differs.
+
+Its second concern is the software development kit, the configurable implementation that sits behind the interface. 
+Here the specification lays out the requirements each language binding must meet, 
+covering how sampling decisions are made, how data is batched, and how it is handed to exporters, 
+so that the kits behave consistently rather than each inventing its own rules.
+
+Its third concern is the shape of the data on the wire. 
+The specification defines the data model for each signal and the OpenTelemetry Protocol that carries them, 
+together with the semantic conventions that name attributes. 
+This is what lets any compliant producer and any compliant backend understand one another without private agreements.
+
+Because the behavior is specified once and implemented many times, the specification is the thing that makes 
+OpenTelemetry portable in the first place. 
+It also evolves carefully, marking each part as experimental or stable so you know what you can depend on. 
+Every other component described in this folder ultimately derives its required behavior from this one document.
+
+
+3. Signals
+----------
+
+OpenTelemetry models observability as a set of signals that share one consistent interface and one data model. 
+A signal is simply a category of telemetry, and the three primary ones are traces, metrics, and logs, 
+joined by baggage and the emerging events and profiles. 
+What makes OpenTelemetry valuable is not any single signal but the decision to treat them together, 
+so they share the same context and attributes.
+
+Traces describe behavior over time. A trace follows one request as it travels through your system, 
+and it is built from spans, where each span is a single unit of work with a start time, a duration, 
+and attributes. Strung together, the spans of a trace show you exactly where a request spent its time and where it failed.
+
+Metrics describe magnitude. A metric is a numeric measurement captured repeatedly at runtime, 
+such as a counter that only goes up, a gauge that rises and falls, or a histogram that buckets a distribution of values. 
+Metrics are cheap to store and ideal for dashboards and alerts because they aggregate cleanly across many requests.
+
+Logs describe individual events. A log is a timestamped record of something that happened, 
+often a line of text with structured fields attached. 
+In OpenTelemetry a log can carry the trace and span identifiers of the request that produced it, 
+which is what turns a wall of log lines into something you can pivot through.
+
+The real point is correlation. 
+Because every signal flows through the same libraries and the same protocol and carries the same context, 
+a single trace identifier can tie a slow span to the metrics and logs around it. 
+Understanding the signals as one connected whole, rather than three separate tools, is the core OpenTelemetry idea.
+
+
+4. Signal — traces
+------------------
+
+A trace is the story of a single request as it moves through your system. 
+From the moment a request arrives to the moment a response goes back, 
+the trace records every meaningful step along the way, 
+even when those steps happen in different services on different machines. 
+It is the signal that answers the question "what actually happened to this one request, and where did the time go?"
+
+The building block of a trace is the span. 
+A span represents one unit of work, such as handling an incoming call, running a database query, 
+or making an outbound request, and it carries a start time and a duration. 
+Each span also has its own identifier and the identifier of the trace it belongs to, 
+which is how individual pieces of work are recognized as part of the same request.
+
+Spans are not a flat list; they form a tree. The first span, called the root, 
+represents the overall request, and every span it triggers becomes a child, 
+which in turn may have children of its own. 
+This parent and child structure is what lets you see that the slow database query lived inside the checkout step, 
+which lived inside the original web request.
+
+Beyond timing, a span carries detail that explains it. It holds attributes, 
+which are key and value pairs describing the work, 
+such as the HTTP route or the database statement; 
+it can hold span events, which mark notable moments within the span; 
+and it has a status that records whether the work succeeded or failed. 
+Together these turn a bare duration into something you can actually diagnose.
+
+What makes traces powerful is that they cross service boundaries, 
+which only works because the trace context is propagated from one hop to the next. 
+When propagation is intact, a single trace can span a browser, a gateway, 
+and a dozen backend services, and you can follow one request end to end. 
+When it breaks, the trace fragments, which is why carrying context everywhere is the discipline that keeps tracing useful.
+
+
+5. Signal — metrics
+-------------------
+
+A metric is a numeric measurement captured repeatedly while your application runs. 
+Where a trace describes one request in detail, a metric describes many requests in aggregate, 
+by reducing them to numbers like a request count, an error rate, or a queue depth. 
+It is the signal you reach for when you want to know the overall health and shape of a system rather than the fate of any single call.
+
+Metrics are produced through instruments, and the kind of instrument you choose reflects the kind of number you are measuring. 
+A counter only ever goes up and suits things you tally, 
+such as the number of requests served. A gauge can rise and fall and suits things you sample, 
+such as memory in use right now. A histogram records a distribution of values, 
+such as request durations, so you can later ask about the median or the slowest few percent.
+
+The numbers are not stored one per event but combined as they are collected, 
+which is what makes metrics so cheap. This combining is called aggregation, 
+and a related choice called temporality decides 
+whether each reported value is a running total since the start or only the change since the last report. 
+These choices matter because they determine how a backend like Prometheus should interpret and add up the data.
+
+Metrics aggregate away the individual requests, but you often still want a way back to an example, 
+and that is what exemplars provide. 
+An exemplar attaches the trace identifier of a representative request to a metric data point, 
+so that a spike in a latency histogram can lead you directly to one of the slow traces behind it. 
+This is one of the concrete payoffs of carrying all the signals in a single system.
+
+What metrics are best at is breadth at low cost. 
+Because they summarize rather than record everything, 
+they are ideal for the dashboards you watch and the alerts that page you, and they stay affordable even at very high request rates. 
+The discipline they demand is care with labels, 
+since attaching high-cardinality values like user identifiers to a metric can multiply its storage cost enormously.
+
+
+6. Signal — logs
+----------------
+
+A log is a timestamped record of something that happened. 
+It is the oldest and most familiar form of telemetry, 
+the line a program writes to say that an order was placed, a payment failed, 
+or a configuration was loaded. In OpenTelemetry, 
+logs are treated as a first-class signal that sits alongside traces and metrics rather than living in a separate world.
+
+Under the surface, OpenTelemetry gives logs a structured data model. 
+Each record has a timestamp, a severity such as info or error, 
+a body holding the message, and a set of attributes carrying structured fields. 
+Because the fields are named rather than buried inside free text, 
+a backend can filter and group logs reliably instead of guessing at the meaning of a string.
+
+The feature that sets these logs apart is correlation. 
+When a log is emitted while a request is in flight, 
+OpenTelemetry can stamp it with the trace and span identifiers of that request. 
+That single link turns a wall of log lines into something navigable: 
+from a slow or failing span you can jump straight to the logs it produced, 
+and from a suspicious log line you can open the full trace around it.
+
+A practical question is how this works with the logging you already have, 
+and the answer is that it usually does not replace it. 
+OpenTelemetry provides a bridge that takes records from your existing logging framework 
+and routes them through its pipeline, adding the trace context and shipping them by the standard protocol. 
+You keep writing logs the way you always have, while they gain correlation and a consistent path to your backend.
+
+The result is that logs stop being an island. By sharing the same resource attributes, 
+the same context, and the same export path as the other signals, 
+they become one corner of a single connected picture. 
+The discipline they ask for is restraint and structure: 
+log meaningful events with named fields rather than noisy free text, 
+so that the volume stays manageable and the data stays queryable.
+
+
+7. Signal — baggage
+-------------------
+
+Baggage is contextual information that rides along with a request as it travels through your system. 
+It is a small set of key and value pairs that you set early, 
+perhaps at the edge where a request first arrives, 
+and that any later service can read without having to look the value up again. 
+Think of it as a note pinned to the request that everyone downstream can see.
+
+The way baggage moves is the same way trace context moves: 
+it is propagated from one service to the next, usually in a request header. 
+When a service makes an outbound call, the current baggage is injected alongside the trace context, 
+and the receiving service extracts it and carries it onward. 
+Because it follows the same path, baggage reaches every hop that propagation reaches.
+
+It helps to be clear about what baggage is not. 
+Baggage is not automatically added to your spans, metrics, or logs; 
+it is simply made available, 
+and it is up to you to decide whether to copy a particular value onto a span as an attribute. 
+This separation is deliberate, because it lets you carry a value for use later without paying to store it on every span in between.
+
+A typical use is propagating a fact that is known only at the start but useful much later. 
+The classic example is a tenant or account identifier, 
+established when the request enters and then read deep in a backend service so it can be attached to the spans that matter there. 
+Without baggage, that downstream service would have no way to know which tenant the request belonged to.
+
+Because baggage is broadcast to everything downstream, it comes with cautions. 
+It travels in headers, so keeping it small matters for performance, 
+and it may cross trust boundaries, so it should never carry secrets or sensitive personal data. 
+Used with that restraint, baggage is a clean way to move a little shared context exactly where it is needed.
+
+
+8. Signal — events (in development)
+-----------------------------------
+
+An event is a specialized kind of log that captures a discrete, well-defined occurrence. 
+Where an ordinary log is often a free-form message, an event is meant to be a recognizable thing that happened, 
+with a name and a predictable shape. It is a signal still under development, growing out of the logs work rather than standing entirely on its own.
+
+Concretely, an event is built on the log data model but adds the discipline of a name and a structured body. 
+The name identifies the type of occurrence, such as a user signing in or a button being clicked, 
+and the body carries the fields that always accompany that type. 
+Because the shape is consistent, tools can reason about events of the same name as a population rather than parsing each message individually.
+
+This is where events differ from the older idea of span events. 
+A span event is a marked moment recorded inside a particular span, tied to that span's lifetime, 
+whereas an event in this newer sense is a standalone record in the log stream, 
+correlated with traces through context but not embedded in a span. 
+The direction of travel is toward expressing these occurrences as first-class events rather than notes attached to spans.
+
+A natural way to picture them is as the structured cousins of analytics or domain events. 
+The same things a product team might track, like a feature being used or a checkout completing, 
+can be emitted as OpenTelemetry events and flow through the same pipeline as the rest of your telemetry. 
+That lets behavioral data and operational data share one path and one context.
+
+Because the signal is still being specified, the practical stance is to treat it as emerging. 
+The concepts and the data model exist and are worth understanding, 
+but the application programming interfaces and conventions are still settling, 
+so you should expect change before relying on events as a stable production foundation.
+
+
+9. Signal — profiles (in development)
+-------------------------------------
+
+A profile is a recording of resource usage at the level of your code. 
+Where a trace tells you which step of a request was slow, a profile goes one level deeper 
+and tells you which functions inside that step actually consumed the time or the memory. 
+It is the newest of OpenTelemetry's signals and is still under development.
+
+What a profile records is where a program spends its resources. 
+By sampling the call stacks of a running process many times a second, 
+it builds a picture of which functions were on the stack most often, 
+which points to where the central processing unit time is going. 
+The same approach can attribute memory allocations to the code paths that requested them.
+
+The phrase usually attached to this is continuous profiling. 
+Traditionally profiling was something you did by hand on a developer's machine when chasing a specific problem, 
+but continuous profiling means collecting these samples all the time, in production, 
+at a low enough overhead to leave running. 
+That turns profiling from an occasional investigation into an always-available view of where resources go.
+
+The reason OpenTelemetry is adopting profiles as a signal is correlation. 
+By sharing the same resource attributes and context as traces, metrics, and logs, 
+a profile can be tied back to the service, and ideally the request, it came from. 
+The goal is to let you move from a slow trace to the exact lines of code responsible, 
+closing the gap between "this request was slow" and "this function is why."
+
+Because the signal is the least mature, the right posture is to watch it rather than depend on it. 
+The data model and protocol are being defined and the ecosystem support is still arriving, 
+so treat profiles today as a promising direction to understand, not yet a stable production foundation.
+
+
+10. Instrumentation and SDKs
+----------------------------
+
+Instrumentation is the work of making an application produce telemetry, 
+and OpenTelemetry offers it in two complementary forms. One is automatic and requires no code changes; 
+the other is manual and lives in your own source. Almost every real system uses a blend of the two.
+
+Automatic instrumentation is the fast path to coverage. 
+A language agent or a set of libraries hooks into the frameworks your application already uses, 
+such as web servers, HTTP clients, and database drivers, and emits spans and metrics for the work those frameworks do. 
+Because it watches the boundaries where requests enter and leave, it gives you broad visibility for very little effort.
+
+Manual instrumentation is where you describe your own logic. 
+Using the application programming interface that the kit provides, you create custom spans, 
+record your own metrics, and attach attributes that capture business meaning the automatic layer cannot see, 
+such as which customer tier a request belongs to. This is the telemetry that turns a generic trace into a story about your domain.
+
+Underneath both sits the software development kit, the configurable engine that actually runs. 
+It is worth separating two ideas here: the interface is the thin surface your code calls, 
+while the kit is the implementation that batches data, applies sampling, and hands telemetry to exporters. 
+You write against the interface and configure the kit, which keeps your instrumentation stable even as the plumbing changes.
+
+The practical guidance follows from this split. 
+Turn on automatic instrumentation first to get breadth across all your boundaries, 
+then add manual spans for the handful of operations that matter most to your domain. 
+Used together, the two forms give you wide coverage without losing the detail that only you can describe.
+
+
+11. Instrumentation libraries
+-----------------------------
+
+Instrumentation libraries are prebuilt packages that generate telemetry from the popular frameworks your application already uses, 
+so you do not have to write span or metric code by hand. 
+Each one targets a specific library and knows how to observe the work that library does. 
+They are the components that make automatic instrumentation possible.
+
+What they wrap is the set of boundaries where your application talks to the outside world. 
+There are instrumentation libraries for web servers and HTTP clients, 
+for remote procedure call frameworks, for database drivers, for message queues, and for caches. 
+Wherever a request enters, a query goes out, or a message is published, a matching library can be there to record it.
+
+The telemetry they produce is not generic. Because they are written against the semantic conventions, 
+the spans and metrics they emit use the agreed attribute names, 
+so an HTTP span from one library looks like an HTTP span from another. 
+That consistency is what lets dashboards and queries work across services without custom mapping.
+
+You bring them in either explicitly or automatically. 
+In the explicit style you add the library as a dependency and register it in your startup code, 
+which gives you fine control. 
+In the zero-code style an agent discovers and loads the right libraries for you at launch, with no source changes at all.
+
+The reason they are so valuable is that the most useful telemetry usually lives at the boundaries your code crosses rather than deep inside your own functions, 
+and those boundaries are exactly what shared frameworks own. Increasingly, 
+libraries are even shipping this instrumentation built in, removing the need for a separate wrapper. 
+Either way, they give you broad coverage cheaply, 
+leaving manual instrumentation for the handful of domain spans only your code can describe.
+
+
+12. Zero-code instrumentation
+-----------------------------
+
+Zero-code instrumentation adds telemetry to an application without touching its source code. 
+It bundles the interface, the kit, and a set of instrumentation libraries, 
+and attaches them from the outside, so an unmodified program begins emitting traces, 
+metrics, and logs the moment it starts. It is the quickest route to observability, especially for software you cannot easily change or rebuild.
+
+How it attaches depends on the language. 
+In some runtimes a separate agent loads alongside the program and rewrites the relevant code in memory as it runs. 
+In others a launcher wraps the start command and pulls in the instrumentation, 
+or a module loads automatically before your code does. 
+In every case the goal is the same: the framework calls get observed without anyone editing them.
+
+You steer it through environment variables rather than code. 
+A few settings name the service, point the exporter at a collector, choose how aggressively to sample, 
+and select which propagation format to use. Because the configuration lives outside the program, 
+the same image can be tuned differently in development and in production.
+
+What you get is broad coverage of the boundaries the bundled libraries understand, 
+which is to say the same incoming and outgoing calls that instrumentation libraries observe. 
+What you do not get is insight into your own business logic, 
+since an external agent has no way to know which internal operations are meaningful to your domain.
+
+That gap is why zero-code instrumentation is best seen as a foundation rather than a finish line. 
+You attach it for instant breadth, then layer a small amount of manual instrumentation on top for the operations that matter most. 
+The two approaches share the same kit underneath, so they combine cleanly into one coherent set of telemetry.
+
+
+13. Context propagation
+-----------------------
+
+Context propagation is the mechanism that links telemetry across service boundaries, 
+and without it distributed tracing simply does not work. 
+The idea is that a small piece of context travels with a request wherever it goes, 
+so that work done in one service can be recognized as part of the same operation in the next. 
+It is the thread that stitches many independent services into a single, coherent trace.
+
+The context being carried is small but precise. It holds the trace identifier that names the overall request, 
+the identifier of the current span that names the immediate parent, and a set of flags, 
+including whether this trace is being sampled. With those few values, 
+a downstream service knows exactly which trace to attach its new spans to.
+
+The movement happens in two steps, called inject and extract. 
+When a service makes an outbound call, the kit injects the context into the request, 
+most often as HTTP headers. When the next service receives that call, 
+it extracts the context from the headers and uses it to continue the trace rather than start a new one.
+
+The format of those headers is standardized so that services written in different languages can understand one another. 
+OpenTelemetry uses the World Wide Web Consortium standard known as Trace Context, 
+which defines two headers, traceparent and tracestate. 
+Alongside the trace context, baggage can travel the same way, 
+carrying small key and value pairs that later services and signals can read.
+
+The hard part in practice is making sure context flows through every single hop. 
+It must survive gateways and proxies, asynchronous boundaries like message queues, 
+and background or batch jobs, because the moment one hop drops it, 
+the trace fragments into disconnected pieces. Treating end-to-end propagation as something to test, 
+not just assume, is what keeps traces whole.
+
+
+14. Semantic conventions
+------------------------
+
+Semantic conventions are OpenTelemetry's agreed vocabulary for describing telemetry. 
+Telemetry is full of attributes, which are the key and value pairs attached to a span, 
+a metric, or a log, and the conventions decide what those keys should be called and what they mean. 
+They are the shared dictionary that lets data from different sources line up.
+
+The conventions cover the operations you see again and again. For a web request, for instance, 
+they specify that the method always lives under the attribute named http dot request dot method, 
+and that the database engine behind a query lives under db dot system. Because the name is fixed, 
+a dashboard built for one service keeps working when the data comes from a completely different service or language.
+
+They also describe the entity producing the data, not just the operation. 
+Resource attributes such as service dot name, 
+service dot version, and the host or container details follow the same agreed naming, 
+so backends can group and filter telemetry by where it originated. 
+The same discipline that standardizes a request also standardizes its source.
+
+The reason this matters is interoperability. When everyone uses the same names, 
+automatic instrumentation, collectors, backends, and the queries you write all understand each other without custom mapping. 
+The moment teams invent their own ad-hoc keys, that shared understanding breaks and every tool needs special-casing.
+
+So the convention is a small habit with a large payoff. 
+Reaching for the standard attribute name instead of making one up, and setting the standard resource attributes everywhere, 
+costs almost nothing at the time of writing. 
+In return you get telemetry that is portable across tools and easy to query, which is the whole point of adopting a common standard.
+
+
+15. Resource detectors
+----------------------
+
+Resource detectors are the components that fill in where your telemetry came from. 
+They do this by inspecting the environment your application runs in when it starts up, 
+and recording what they find as resource attributes. 
+The point is to discover the origin of the data automatically rather than make you write it down by hand.
+
+To understand them you first need the idea of a resource. 
+A resource is the fixed set of attributes that describes the entity producing telemetry, 
+such as the service name and version, the host and operating system, the process, 
+and the cloud or Kubernetes details around it. 
+Once established it is attached to every signal the application emits, so every span, metric, and log knows its source.
+
+A detector is what populates that resource. 
+One detector reads attributes from environment variables, another reads process and operating-system facts, 
+and others query the container runtime or a cloud provider's metadata endpoint to learn the region, 
+account, or pod. Each contributes the slice of the picture it knows about.
+
+Because several detectors can run at once, their findings are merged, 
+and there are clear rules for what wins when they overlap. 
+Values you set explicitly, including anything supplied through the standard resource-attributes environment variable, 
+take precedence over what is detected, so you can always override a guess. 
+The result is one combined resource assembled from many sources.
+
+All of this matters because telemetry is only useful when you can tell where it came from, 
+and that origin is a property of the deployment rather than the code. 
+Detectors keep the resource accurate as the very same binary moves from a laptop to a build runner to a production pod. With that origin in place, 
+a backend can group and filter by service, version, host, and environment without anyone tagging the data manually.
+
+
+16. Samplers
+------------
+
+Samplers decide which traces a system actually records and keeps. 
+Their reason to exist is cost: capturing and storing every request at full detail is expensive and usually unnecessary, 
+so a sampler keeps a representative portion and lets the rest go. They let you trade some completeness for a large saving in volume.
+
+As a component, a sampler implements what is called head sampling. 
+This is the decision made right at the start of a trace, inside the kit, 
+before the spans have even been produced. 
+Deciding early is cheap because nothing is recorded for the traces you drop, 
+but it is also blind, since at that moment you cannot yet know whether the request will be slow or fail.
+
+The decision has to be consistent across every service the request touches, 
+or a trace ends up recorded in some services and missing in others. 
+This is why the sampling choice travels inside the propagated context: a parent service makes the call, 
+and its children honor it rather than each flipping their own coin. 
+That shared decision is what keeps a sampled trace whole from end to end.
+
+To make up for the blindness of head sampling, it is often paired with tail sampling in the collector. 
+There the full trace is buffered until it completes, so the decision can be based on what actually happened. 
+A common policy is to keep every trace that contains an error or that ran unusually slowly, while dropping the routine successes that all look the same.
+
+Put together, the two layers give you both economy and signal. 
+Head sampling in the kit cuts the raw volume cheaply and consistently, 
+while tail sampling in the collector rescues the traces that are worth keeping regardless of the dice. 
+The guiding rule is simple: thin out the ordinary traffic, but never throw away your errors and your slow requests.
+
+
+17. The Collector
+-----------------
+
+The OpenTelemetry Collector is a standalone service that sits between your applications and your observability backends. 
+Its job is to receive telemetry, process it, and export it onward, 
+which lets your applications stay simple and unaware of where their data ultimately goes. 
+You describe everything it does in configuration rather than code, and it is built as a pipeline with three stages.
+
+The first stage is receivers. A receiver is an entry point that accepts incoming telemetry in some format, 
+whether that is the native OpenTelemetry Protocol or an older format such as Jaeger or Prometheus. 
+A single collector can run many receivers at once, so it can act as a common landing point for data arriving in different shapes.
+
+The second stage is processors. A processor transforms the data as it passes through, 
+and this is where most of the useful work happens. 
+Processors batch records together for efficiency, filter out noise, redact sensitive fields, 
+enrich data with extra attributes, and apply tail sampling once a full trace has been seen.
+
+The third stage is exporters. An exporter takes the processed data and sends it to a destination, 
+which might be one backend or several at the same time. 
+Because the collector can fan the same data out to multiple exporters, 
+you can send traces to one system and metrics to another, or try a new backend in parallel without touching your applications.
+
+Running a collector is the recommended pattern for exactly these reasons. 
+Your applications only ever speak one protocol to one place, 
+while the collector absorbs the complexity of sampling, formatting, and routing. 
+The result is simpler instrumentation and a single point where telemetry policy lives, 
+typically deployed as a lightweight agent next to each workload feeding a larger central gateway.
+
+
+18. Exporters and OTLP
+----------------------
+
+Exporters and the OpenTelemetry Protocol are how telemetry actually leaves your application. 
+An exporter is the component that takes the data your code has produced and sends it somewhere, 
+and the protocol, commonly called OTLP, is the native format it speaks. 
+Together they are the last step of the producer pipeline, the point where in-memory spans, metrics, and logs become bytes on the wire.
+
+The protocol is designed to carry every signal without loss. 
+OTLP defines a single, well-specified format for traces, metrics, and logs alike, 
+and it travels over two transports, either gRPC or plain HTTP. 
+Because it was designed alongside the data model itself, 
+an OTLP exporter can represent everything OpenTelemetry knows about a piece of telemetry, 
+with no fields quietly dropped along the way.
+
+Exporters come in more than one kind. 
+The OTLP exporter is the preferred choice and sends data to a collector or to any backend that understands the protocol. 
+For systems that predate OpenTelemetry or speak only their own dialect, 
+backend-specific exporters exist to translate the data into formats like Prometheus or Zipkin, 
+though that translation can lose detail the native protocol would have kept.
+
+The payoff of standardizing on the protocol is portability. 
+Because the destination is just an exporter configuration, 
+you can move from one backend to another by changing settings rather than re-instrumenting a single line of code. 
+Your investment in instrumentation is protected even as your storage and analysis tools change underneath it.
+
+In practice this is the everyday benefit of adopting OpenTelemetry. 
+You treat the protocol as the common language that every part of your system speaks, 
+you export it from your applications to a collector, and you let the collector handle any translation a stubborn backend requires. 
+Keeping that boundary clean is what makes the rest of the architecture flexible.
+
+
+19. Kubernetes operator
+-----------------------
+
+The OpenTelemetry Operator brings OpenTelemetry into Kubernetes the way Kubernetes itself likes to work, 
+through declarative custom resources. Instead of running and wiring things by hand, 
+you describe what you want in a manifest and the operator continuously makes the cluster match it. 
+It manages two things in particular: the collector, and the automatic instrumentation of your workloads.
+
+Managing the collector is the first half. You write a resource that describes the collector you want, 
+including its configuration and how it should be deployed, and the operator creates and maintains it for you. 
+If the configuration drifts or a pod dies, the operator reconciles the cluster back to the state you declared.
+
+Injecting instrumentation is the second and more distinctive half. 
+You write a separate resource that names a language and its settings, 
+and then you annotate the pods that should receive it. 
+When such a pod is created, the operator steps in through an admission webhook and adds the zero-code agent, 
+the exporter endpoint, and the resource attributes, all without rebuilding the application image.
+
+It is also flexible about how the collector itself is deployed. 
+The same operator can run a collector as a central deployment, as a node-level daemon that collects from every host, 
+as a sidecar beside a single workload, or as a stateful set when persistence matters. 
+You pick the shape that fits the job rather than being forced into one.
+
+Taken together, this is what makes telemetry feel native to the cluster. The plumbing is configured with the same manifests, 
+the same review process, and the same tooling as everything else you run on Kubernetes. 
+A common arrangement pairs a node-level agent for collection with a central gateway for processing, 
+and instruments the workloads themselves simply by annotating their pods.
+
+
+20. Function-as-a-Service assets
+--------------------------------
+
+Function-as-a-Service assets are prebuilt packages that bring OpenTelemetry to serverless functions, 
+where the usual ways of running an agent simply do not apply. In practice they are mostly delivered as layers for AWS Lambda, 
+a layer being a bundle of code you attach to a function without baking it into your own deployment. 
+They exist to make instrumenting a function a matter of attaching something and setting a few variables, rather than reworking the function itself.
+
+They come in two kinds, and the first is the instrumentation layer. 
+This bundles the interface, the kit, and a set of automatic instrumentation libraries, 
+and wires them into the function so it starts emitting traces and metrics for the events and calls it handles. 
+It is the serverless equivalent of zero-code instrumentation, packaged for a place where you cannot install an agent on a host.
+
+The second kind is the collector layer. Because there is no long-lived machine nearby to send data to, 
+this layer runs a small collector inside the function's own execution environment as an extension. 
+The function exports its telemetry locally to that collector, and the collector takes responsibility for forwarding it onward, 
+which keeps the export fast and off the request's critical path.
+
+The serverless lifecycle is what makes all this necessary. 
+Invocations are short, there is no host you control, 
+and the runtime may freeze the moment a request finishes and thaw again for the next one. 
+The assets handle that lifecycle, and in particular they make sure pending telemetry is flushed before the environment freezes, 
+so that data is not silently lost between invocations.
+
+For the same reason, cold starts are the cost to watch. 
+Loading the layers adds time to the first invocation after a function scales up, 
+so the practical advice is to keep batching small and timeouts short, and to confirm that telemetry flushes on shutdown. 
+With those settings in place, a function gains full observability simply by attaching the layers and configuring them through environment variables.
