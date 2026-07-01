@@ -336,7 +336,8 @@ In the explicit style you add the library as a dependency and register it in you
 which gives you fine control. 
 In the zero-code style an agent discovers and loads the right libraries for you at launch, with no source changes at all.
 
-The reason they are so valuable is that the most useful telemetry usually lives at the boundaries your code crosses rather than deep inside your own functions, 
+The reason they are so valuable is that the most useful telemetry usually 
+lives at the boundaries your code crosses rather than deep inside your own functions, 
 and those boundaries are exactly what shared frameworks own. Increasingly, 
 libraries are even shipping this instrumentation built in, removing the need for a separate wrapper. 
 Either way, they give you broad coverage cheaply, 
